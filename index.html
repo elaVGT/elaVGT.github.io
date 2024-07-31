@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>ElaRtlsWeb</title>
+    <base href="/" />
+    <link href="css/bootstrap/bootstrap.min.css" rel="stylesheet" />
+    <link href="css/app.css" rel="stylesheet" />
+    <link href="ElaRtlsWeb.styles.css" rel="stylesheet" />
+    <link href="manifest.json" rel="manifest" />
+    <link rel="apple-touch-icon" sizes="512x512" href="icon-512.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png" />
+</head>
+
+<body>
+    <div id="app">Loading...</div>
+
+    <div id="blazor-error-ui">
+        An unhandled error has occurred.
+        <a href="" class="reload">Reload</a>
+        <a class="dismiss">🗙</a>
+    </div>
+
+    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="_content/Microsoft.AspNetCore.Components.WebAssembly.Authentication/AuthenticationService.js"></script>
+    <!-- MQTT libraries -->
+    <script src="scripts/mqtt_min.js"></script>
+
+
+    <script>navigator.serviceWorker.register('service-worker.js');</script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
+          integrity="sha256-kLaT2GOSpHechhsozzB+flnD+zUyjE2LlfWPgU04xyI="
+          crossorigin="" />
+
+    <!-- Make sure you put this AFTER Leaflet's CSS -->
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
+            integrity="sha256-WBkoXOwTeyKclOHuWtc+i2uENFpDZ9YPdf5Hf+D7ewM="
+            crossorigin=""></script>
+
+    <script type="text/javascript">
+        maps = {};
+        circles = {};
+        floors = {};
+        circlegps = {};
+        var client;
+
+        window.GetAccessToken = () => {
+            console.log('Trying to get Access Token')
+            const myHeaders = new Headers();
+            myHeaders.append("Authorization", "Basic ZWxhaW5ub3ZhdGlvbjoxMjNlYTg0ZDk5ODU0NDZjIw==");
+            myHeaders.append("Content-Type", "application/x-www-form-urlencoded");
+
+            const urlencoded = new URLSearchParams();
+            urlencoded.append("grant_type", "client_credentials");
+
+            const requestOptions = {
+                method: "POST",
+                headers: myHeaders,
+                body: urlencoded,
+                redirect: "follow"
+            };
+
+            fetch("http://elainnovation.cassia.pro/api/oauth2/token", requestOptions)
+                .then((response) => response.text())
+                .then((result) => console.log(result))
+                .catch((error) => console.error(error));
+
+        };
+
+        window.MqttConnect = (mHost, mClientID) => {
+            //const host = 'ws://192.168.0.59:8083/mqtt'
+            console.log(mHost)
+            console.log(mClientID)
+            var options = {
+                clientId: mClientID,
+                reconnect: true,
+                keepalive: 60,
+                protocolId: 'MQTT',
+                protocolVersion: 4,
+                clean: true,
+                reconnectPeriod: 1000,
+                connectTimeout: 30 * 1000,
+            }
+
+            console.log('Connecting mqtt client')
+            client = mqtt.connect(mHost, options)
+            client.on('connect', function () {
+                console.log('Connected')
+            })
+            client.on('error', (err) => {
+                console.log('Connection error: ', err)
+            })
+            client.on('reconnect', () => {
+                console.log('Reconnecting...')
+            })
+            client.on('offline', function () {
+                console.log("offline");
+            })
+            client.on('message', (topic, message) => {
+                DotNet.invokeMethodAsync('ElaRtlsWeb', 'ReceiveMessage', `${topic}`, `${message.toString()}`);
+            })
+        };
+
+
+        window.MqttDisconnect = () => {
+            client.end()
+        };
+
+        window.MqttSubscribe = (topic) => {
+            // Subscribe to a topic
+            client.subscribe(topic, { qos: 0 }, function (error, granted) {
+                if (error) {
+                    console.log(error)
+                } else {
+                    console.log(`${granted[0].topic} was subscribed`)
+                }
+            })
+        };
+
+        window.MqttUnsubscribe = (topic) => {
+            // Unsubscribe to a topic
+            client.unsubscribe(topic, function (error) {
+                if (error) {
+                    console.log(error)
+                } else {
+                    console.log('Unsubscribed')
+                }
+            })
+        };
+
+        window.MqttPublish = (topic, payload) => {
+            // Send a test message with QoS of 0 to the testtopic
+            client.publish(topic, payload, { qos: 0, retain: false }, function (error) {
+                if (error) {
+                    console.log(error);
+                } else {
+                    console.log('Published');
+                }
+            })
+        };
+
+        window.Initialize = (defaultFloor) => {
+            var mymap = L.map('mapid').setView(new L.LatLng(defaultFloor.lat, defaultFloor.lng), 19);
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxNativeZoom: 19,
+                maxZoom: 23,
+                attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            }).addTo(mymap);
+            mymap.on('click', (e) => {
+                console.log('clicked')
+                //DotNet.invokeMethodAsync('ElaRtlsWeb', 'GetLatLng', e.latlng.toString());
+            })
+            maps['mapid'] = mymap;
+            return 'map initialized';
+        };
+
+        window.RestoreView = (lmmap) => {
+            maps[lmmap.mapId].panTo(new L.LatLng(lmmap.lat, lmmap.lng));
+            return 'View Restored';
+        };
+
+        window.AddCircle = (cl) => {
+            var mycircle = L.circle(new L.LatLng(cl.centreLat, cl.centreLng), {
+                color: cl.circleColor,
+                fillColor: cl.circleColor,
+                fillOpacity: 0.5,
+                radius: cl.radius
+            }).addTo(circlegps[1]);
+            mycircle.bindPopup(cl.circleInfo);
+            circles[cl.circleId] = mycircle;
+            return 'circle added';
+        };
+
+        window.AddEditableCircle = (cl) => {
+            var mycircle = L.circle(new L.LatLng(cl.centreLat, cl.centreLng), {
+                color: 'yellow',
+                fillColor: cl.circleColor,
+                fillOpacity: 0.7,
+                radius: cl.radius
+            }).addTo(circlegps[1]);
+            mycircle.on('mousedown', () => {
+                console.log('marker:down')
+                maps['mapid'].dragging.disable();
+                maps['mapid'].on('mousemove', (e) => mycircle.setLatLng(e.latlng))
+            })
+            mycircle.on('mouseup', () => {
+                console.log('marker:up')
+                maps['mapid'].dragging.enable();
+                maps['mapid'].off('mousemove')
+            })
+            mycircle.bindPopup(cl.circleInfo);
+            return 'editable circle added';
+        };
+
+        window.LoadFloor = (fl) => {
+            var circleGroup = L.featureGroup();
+            maps['mapid'].addLayer(circleGroup);
+            circlegps[1] = circleGroup;
+            var imageUrl = fl.floorPlan;
+            var latLngBounds = L.latLngBounds([[fl.floorBoundLat2, fl.floorBoundLng2], [fl.floorBoundLat1, fl.floorBoundLng1]]);
+            var errorOverlayUrl = 'https://cdn-icons-png.flaticon.com/512/110/110686.png';
+            var altText = 'Ela Innovation';
+            var imageOverlay = L.imageOverlay(imageUrl, latLngBounds, {
+                opacity: 1,
+                errorOverlayUrl: errorOverlayUrl,
+                alt: altText,
+                interactive: true
+            }).addTo(maps['mapid']);
+            floors[fl.floorId] = imageOverlay;
+            return 'floor Loaded';
+        };
+
+        window.LoadPlan = (plan) => {
+
+            var matrix = [1, 0, 0, 1, 0, 0];
+
+            maps['mapid'].on('zoomend', function (e) {
+
+                var topLeftPoint = maps['mapid'].latLngToLayerPoint(corners[3]);
+                matrix[4] = topLeftPoint.x;
+                matrix[5] = topLeftPoint.y;
+                floorOverlay.getElement().style[L.DomUtil.TRANSFORM + '-origin'] = '0 0';
+                floorOverlay.getElement().style[L.DomUtil.TRANSFORM] = 'matrix(' + matrix[0] + ', ' + matrix[1] + ', ' + matrix[2] + ', ' + matrix[3] + ', ' + matrix[4] + ', ' + matrix[5] + ')';
+
+            })
+
+            var corners;
+            var floorOverlay;
+            var overlay = new Image();
+            overlay.src = plan.floorPlan;
+            overlay.onload = function () {
+
+                var originalImageWidth = overlay.width;
+                var originalImageHeight = overlay.height;
+                var aspectRatio = parseInt(originalImageWidth) / parseInt(originalImageHeight);
+                var imageHeight = 200;
+                var imageWidth = parseInt(aspectRatio * imageHeight);
+                var center = maps['mapid'].project(new L.LatLng(plan.floorCentreLat, plan.floorCentreLng));
+                var offset = L.point(imageWidth, imageHeight).divideBy(2);
+                corners = [
+                    maps['mapid'].unproject(center.add(L.point(-offset.x, offset.y))),
+                    maps['mapid'].unproject(center.add(offset)),
+                    maps['mapid'].unproject(center.add(L.point(offset.x, -offset.y))),
+                    maps['mapid'].unproject(center.subtract(offset))
+                ];
+
+                var latLngBounds = L.latLngBounds([corners[0], corners[2]]); //
+
+                floorOverlay = L.imageOverlay(plan.floorPlan, latLngBounds, {
+                    opacity: 0.3,
+                    interactive: true
+                }).addTo(maps['mapid']);
+
+
+                var topLeftPoint = maps['mapid'].latLngToLayerPoint(corners[3]);
+                matrix[4] += topLeftPoint.x;
+                matrix[5] += topLeftPoint.y;
+
+                var DragMarker = L.marker(corners[0], {
+                    draggable: true
+                }).addTo(maps['mapid']);
+
+                DragMarker.on('dragend', function (e) {
+
+                    // translate
+                    var formerLatLng = corners[0];
+                    var newLatLng = DragMarker.getLatLng();
+                    var formerPoint = maps['mapid'].latLngToLayerPoint(formerLatLng);
+                    var newPoint = maps['mapid'].latLngToLayerPoint(newLatLng);
+                    var delta = L.point(newPoint.x - formerPoint.x, newPoint.y - formerPoint.y);
+
+                    for (i = 0; i < 4; i++) {
+                        p = maps['mapid'].project(corners[i]).add(delta);
+                        corners[i] = maps['mapid'].unproject(p);
+                    }
+
+                    var topLeftPoint = maps['mapid'].latLngToLayerPoint(corners[3]);
+                    matrix[4] = topLeftPoint.x;
+                    matrix[5] = topLeftPoint.y;
+
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM + '-origin'] = '0 0';
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM] = 'matrix(' + matrix[0] + ', ' + matrix[1] + ', ' + matrix[2] + ', ' + matrix[3] + ', ' + matrix[4] + ', ' + matrix[5] + ')';
+                    RotateScaleMarker.setLatLng(corners[2]);
+                })
+
+                //
+
+
+                var RotateScaleMarker = L.marker(corners[2], {
+                    draggable: true
+                }).addTo(maps['mapid']);
+                RotateScaleMarker.on('dragend', function (e) {
+
+                    var formerLatLng = corners[2];
+                    var formerPoint = maps['mapid'].latLngToLayerPoint(formerLatLng);
+
+                    var newLatLng = RotateScaleMarker.getLatLng();
+                    var newPoint = maps['mapid'].latLngToLayerPoint(newLatLng);
+
+                    var centerLatLng = new L.LatLng((corners[0].lat + corners[2].lat) / 2, (corners[0].lng + corners[2].lng) / 2);
+                    var center = maps['mapid'].project(centerLatLng);
+                    var centerPoint = maps['mapid'].latLngToLayerPoint(centerLatLng);
+
+                    //Rotating
+                    var initialAngle = Math.atan2(centerPoint.y - formerPoint.y, centerPoint.x - formerPoint.x);
+                    var newAngle = Math.atan2(centerPoint.y - newPoint.y, centerPoint.x - newPoint.x);
+                    var angle = newAngle - initialAngle;
+                    var angleDeg = angle * (180 / Math.PI);
+
+                    var cos = Math.cos(angle);
+                    var sin = Math.sin(angle);
+                    var m11 = matrix[0] * cos + matrix[2] * sin;
+                    var m12 = matrix[1] * cos + matrix[3] * sin;
+                    var m21 = -matrix[0] * sin + matrix[2] * cos;
+                    var m22 = -matrix[1] * sin + matrix[3] * cos;
+                    matrix[0] = m11;
+                    matrix[1] = m12;
+                    matrix[2] = m21;
+                    matrix[3] = m22;
+
+                    //Scaling
+                    var formerRadiusSquared = Math.pow((centerPoint.x - formerPoint.x), 2) + Math.pow(centerPoint.y - formerPoint.y, 2);
+                    var newRadiusSquared = Math.pow((centerPoint.x - newPoint.x), 2) + Math.pow(centerPoint.y - newPoint.y, 2);
+                    var scale = Math.sqrt(newRadiusSquared / formerRadiusSquared);
+
+                    matrix[0] *= scale;
+                    matrix[1] *= scale;
+                    matrix[2] *= scale;
+                    matrix[3] *= scale;
+
+                    for (i = 0; i < 4; i++) {
+
+                        //Scaling
+                        //console.log(corners[i].lat);
+                        o = maps['mapid'].project(corners[i]).subtract(center).multiplyBy(scale).add(center);
+                        corners[i] = maps['mapid'].unproject(o);
+
+                        //Rotating
+                        p = maps['mapid'].project(corners[i]).subtract(center);
+                        q = L.point(Math.cos(angle) * p.x - Math.sin(angle) * p.y, Math.sin(angle) * p.x + Math.cos(angle) * p.y);
+                        corners[i] = maps['mapid'].unproject(L.point(q.add(center)));
+                    }
+
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM + '-origin'] = 'center';
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM] = 'matrix(' + matrix[0] + ', ' + matrix[1] + ', ' + matrix[2] + ', ' + matrix[3] + ', ' + matrix[4] + ', ' + matrix[5] + ')';
+
+                    var topLeftPoint = maps['mapid'].latLngToLayerPoint(corners[3]);
+                    matrix[4] = topLeftPoint.x;
+                    matrix[5] = topLeftPoint.y;
+
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM + '-origin'] = '0 0';
+                    floorOverlay.getElement().style[L.DomUtil.TRANSFORM] = 'matrix(' + matrix[0] + ', ' + matrix[1] + ', ' + matrix[2] + ', ' + matrix[3] + ', ' + matrix[4] + ', ' + matrix[5] + ')';
+
+                    DragMarker.setLatLng(corners[0]);
+
+                })
+            }
+
+            return 'Plan Loaded';
+        };
+
+        window.UpdateCircle = (cl) => {
+            if (circles[cl.circleId] !== undefined) {
+                circles[cl.circleId].setLatLng(new L.LatLng(cl.centreLat, cl.centreLng));
+                circles[cl.circleId].setRadius(cl.radius);
+                return 'circle updated';
+            }
+            else {
+                return 'circle not present';
+            }
+
+        };
+
+        window.ClearMap = (fid) => {
+            maps['mapid'].eachLayer(function (layer) {
+                if (layer == floors[fid]) {
+                    maps['mapid'].removeLayer(layer);
+                }
+            });
+
+            if (maps['mapid'].hasLayer(circlegps[1])) {
+                maps['mapid'].removeLayer(circlegps[1]);
+                circlegps = {};
+            }
+            return 'floor cleared';
+        };
+
+        window.ClearDevices = (fid) => {
+            if (maps['mapid'].hasLayer(circlegps[1])) {
+                maps['mapid'].removeLayer(circlegps[1]);
+                circlegps = {};
+            }
+
+            var circleGroup = L.featureGroup();
+            maps['mapid'].addLayer(circleGroup);
+            circlegps[1] = circleGroup;
+            return 'devices cleared';
+        };
+
+    </script>
+
+</body>
+
+</html>
